@@ -9,7 +9,6 @@ WORKDIR /usr/src/app
 
 # Instalación de dependencias
 COPY package*.json ./
-RUN npm install --production
 
 # Copia del código fuente
 COPY . .
