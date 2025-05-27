@@ -1,20 +1,21 @@
-# Use an official Node.js runtime as a parent image
-FROM node:14
+# Utiliza la versión LTS actual de Node.js con Alpine
+FROM node:20.9.0-alpine3.18
 
-# Set the working directory in the container
+# Configuración del entorno de producción
+ENV NODE_ENV=production
+
+# Directorio de trabajo
 WORKDIR /usr/src/app
 
-# Copy package.json and package-lock.json to the working directory
+# Instalación de dependencias
 COPY package*.json ./
+RUN npm install --production
 
-# Install app dependencies
-RUN npm install
-
-# Copy the rest of the application code to the working directory
+# Copia del código fuente
 COPY . .
 
-# Expose the port the app runs on
+# Puerto expuesto
 EXPOSE 3000
 
-# Define the command to run the application
+# Comando de inicio
 CMD ["npm", "start"]
