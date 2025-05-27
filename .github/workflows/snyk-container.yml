@@ -1,4 +1,4 @@
-name: Snyk Container Security Scan
+name: Enhanced Security Scan Workflow
 
 on:
   push:
@@ -9,9 +9,9 @@ on:
     - cron: '39 20 * * 1'
 
 env:
-  SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-  IMAGE_NAME: "your/image-to-test"
+  IMAGE_NAME: "node:14"
   DOCKERFILE: "Dockerfile"
+  SCAN_TOOL: "snyk"  # o "style" según tu herramienta
 
 permissions:
   contents: read
@@ -20,25 +20,65 @@ permissions:
   id-token: write
 
 jobs:
-  snyk-scan:
+  security-scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - name: Install Snyk
-        run: npm install -g snyk
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq docker.io
+          npm install -g $SCAN_TOOL
 
       - name: Build Docker image
         run: docker build -t $IMAGE_NAME -f $DOCKERFILE .
 
-      - name: Authenticate with Snyk
-        run: snyk auth $SNYK_TOKEN
+      - name: Authenticate with scan tool
+        run: |
+          if [ "$SCAN_TOOL" = "snyk" ]; then
+            snyk auth ${{ secrets.SNYK_TOKEN }}
+          else
+            echo "Implement Style authentication here"
+            # style auth ${{ secrets.STYLE_TOKEN }}
+          fi
 
-      - name: Run Snyk container scan
-        run: snyk container test $IMAGE_NAME --file=$DOCKERFILE --sarif-file-output=snyk.sarif
-        continue-on-error: true
+      - name: Run security scan and fix SARIF format
+        run: |
+          if [ "$SCAN_TOOL" = "snyk" ]; then
+            snyk container test $IMAGE_NAME --file=$DOCKERFILE --severity-threshold=medium --sarif-file-output=scan_results.sarif || true
+          else
+            # Comando equivalente para Style si es diferente
+            style scan container $IMAGE_NAME --output=scan_results.sarif || true
+          fi
+          
+          # Corregir formato SARIF
+          jq '
+            .runs[].results[] |= (
+              if .level == null then .level = "warning" else . end |
+              if .locations[].physicalLocation.region.startLine == null then del(.locations[].physicalLocation.region.startLine) else . end
+            )' scan_results.sarif > fixed_results.sarif
+
+      - name: Validate SARIF file
+        run: |
+          if [ ! -s fixed_results.sarif ]; then
+            echo "Error: SARIF file is empty or missing"
+            exit 1
+          fi
+          
+          if jq -e '.runs[].results[] | select(.level == null)' fixed_results.sarif; then
+            echo "Error: Still found results with null severity"
+            exit 1
+          fi
 
       - name: Upload results to GitHub Code Scanning
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: snyk.sarif
+          sarif_file: fixed_results.sarif
+          checkout_path: ${{ github.workspace }}
+
+      - name: Post-scan cleanup
+        run: |
+          docker rmi $IMAGE_NAME || true
+          rm -f scan_results.sarif fixed_results.sarif
