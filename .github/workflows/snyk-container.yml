@@ -106,7 +106,7 @@ jobs:
         if: always()
         run: |
           if [ -f "sanitized.sarif" ]; then
-            echo "📊 Resumen del análisis de seguridad:"
+            echo "Resumen del análisis de seguridad:"
             TOTAL_RESULTS=$(jq '.runs[0].results | length' sanitized.sarif 2>/dev/null || echo "0")
             echo "Total de vulnerabilidades encontradas: $TOTAL_RESULTS"
             
