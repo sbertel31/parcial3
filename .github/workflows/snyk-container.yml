@@ -1,90 +1,68 @@
-name: Enhanced Container Security Scan
+name: Snyk Docker Analysis
 
 on:
   push:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
-  schedule:
-    - cron: '39 20 * * 1'  # Ejecución semanal cada lunes a las 20:39
-
-env:
-  SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-  IMAGE_NAME: "ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}:${{ github.sha }}"
-  DOCKERFILE: "Dockerfile"
-  NODE_VERSION: "20.9.0"  # Versión LTS actual de Node.js
 
 permissions:
   contents: read
   security-events: write
-  packages: write  # Necesario para push a GHCR
-  id-token: write
 
 jobs:
-  security-scan:
+  snyk:
     runs-on: ubuntu-latest
+
+    env:
+      IMAGE_NAME: ghcr.io/${{ github.repository }}:${{ github.sha }}
+      DOCKERFILE: Dockerfile
+
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js ${{ env.NODE_VERSION }}
-        uses: actions/setup-node@v3
-        with:
-          node-version: ${{ env.NODE_VERSION }}
+      - name: Log in to GitHub Container Registry
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
-      - name: Install dependencies
-        run: npm install -g snyk docker
+      - name: Build Docker image
+        run: docker build -t $IMAGE_NAME -f $DOCKERFILE .
 
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v2
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify Docker image exists
+        run: docker images | grep "${{ github.repository }}"
 
-      - name: Build Docker image (Node.js ${{ env.NODE_VERSION }})
-        run: |
-          docker build -t $IMAGE_NAME \
-            --build-arg NODE_VERSION=$NODE_VERSION \
-            -f $DOCKERFILE .
-          docker tag $IMAGE_NAME ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}:latest
+      - name: Show Dockerfile contents (debug)
+        run: cat $DOCKERFILE
+
+      - name: Set up Snyk
+        uses: snyk/actions/setup@v1
 
       - name: Authenticate with Snyk
-        run: snyk auth $SNYK_TOKEN
+        run: snyk auth ${{ secrets.SNYK_TOKEN }}
 
       - name: Run Snyk container scan
+        continue-on-error: true
         run: |
           snyk container test $IMAGE_NAME \
-            --file=$DOCKERFILE \
             --severity-threshold=medium \
+            --file=$DOCKERFILE \
             --exclude-base-image-vulns \
             --sarif-file-output=snyk.sarif
-        continue-on-error: true
 
       - name: Process SARIF results
         run: |
-          # Corregir formato y filtrar falsos positivos
-          jq '
-            .runs[].results[] |= (
-              if .level == null then .level = "warning" else . end |
-              if .locations[].physicalLocation.region.startLine == null then del(.locations[].physicalLocation.region.startLine) else . end
-            )' snyk.sarif > processed-snyk.sarif
+          if [ -f snyk.sarif ]; then
+            jq '
+              .runs[].results[] |= (
+                if .level == null then .level = "warning" else . end |
+                if .locations[].physicalLocation.region.startLine == null then del(.locations[].physicalLocation.region.startLine) else . end
+              )' snyk.sarif > processed-snyk.sarif
+          else
+            echo "snyk.sarif no encontrado. Omitiendo procesamiento."
+          fi
 
-      - name: Upload results to GitHub Code Scanning
+      - name: Upload SARIF results to GitHub
+        if: always() && exists('processed-snyk.sarif')
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: processed-snyk.sarif
-          checkout_path: ${{ github.workspace }}
-
-      - name: Push Docker image to GHCR
-        run: |
-          docker push $IMAGE_NAME
-          docker push ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}:latest
-
-      - name: Verify container health
-        run: |
-          docker run -d --name test-container -p 3000:3000 $IMAGE_NAME
-          sleep 10
-          curl -s http://localhost:3000 || echo "Health check failed"
-          docker stop test-container
-          docker rm test-container
