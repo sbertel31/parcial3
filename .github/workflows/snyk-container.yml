@@ -1,4 +1,4 @@
-name: Node.js Security Scan and Build
+name: Snyk Container Security Scan
 
 on:
   push:
@@ -6,88 +6,39 @@ on:
   pull_request:
     branches: [ "main" ]
   schedule:
-    - cron: '0 0 * * 0' # Ejecución semanal cada domingo a medianoche
+    - cron: '39 20 * * 1'
 
 env:
-  DOCKERFILE: "Dockerfile"
+  SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
   IMAGE_NAME: "ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}:${{ github.sha }}"
-  CONTAINER_NAME: "app-node-container"
-  PORT: "3000"
+  DOCKERFILE: "Dockerfile"
 
 permissions:
   contents: read
   security-events: write
-  packages: write
+  actions: read
   id-token: write
 
 jobs:
-  build-and-scan:
+  snyk-scan:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v3
-        with:
-          node-version: '14.x'
-
-      - name: Install dependencies
-        run: npm install
-
-      - name: Run tests
-        run: npm test
-
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v2
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install Snyk
+        run: npm install -g snyk
 
       - name: Build Docker image
-        run: |
-          docker build -t $IMAGE_NAME -f $DOCKERFILE .
-          docker tag $IMAGE_NAME ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}:latest
+        run: docker build -t $IMAGE_NAME -f $DOCKERFILE .
 
-      - name: Scan with Snyk
-        uses: snyk/actions/docker@master
+      - name: Authenticate with Snyk
+        run: snyk auth $SNYK_TOKEN
+
+      - name: Run Snyk container scan
+        run: snyk container test $IMAGE_NAME --file=$DOCKERFILE --sarif-file-output=snyk.sarif
         continue-on-error: true
-        with:
-          command: monitor
-          args: --severity-threshold=high --file=$DOCKERFILE
-          image: $IMAGE_NAME
-          sarif-file-output: snyk.sarif
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
-      - name: Fix SARIF format
-        run: |
-          jq '
-            .runs[].results[] |= (
-              if .level == null then .level = "warning" else . end |
-              if .locations[].physicalLocation.region.startLine == null then del(.locations[].physicalLocation.region.startLine) else . end
-            )' snyk.sarif > fixed_results.sarif
-
-      - name: Upload security results
+      - name: Upload results to GitHub Code Scanning
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: fixed_results.sarif
-
-      - name: Push Docker image
-        run: |
-          docker push $IMAGE_NAME
-          docker push ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}:latest
-
-      - name: Verify deployment
-        run: |
-          docker run -d --name $CONTAINER_NAME -p $PORT:$PORT $IMAGE_NAME
-          sleep 10
-          curl -s http://localhost:$PORT/health-check || echo "Verification failed"
-          docker stop $CONTAINER_NAME
-          docker rm $CONTAINER_NAME
-
-      - name: Cleanup
-        run: |
-          docker rmi $IMAGE_NAME
-          rm -f *.sarif
+          sarif_file: snyk.sarif
