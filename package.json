@@ -1,0 +1,19 @@
+{
+  "name": "parcial3",
+  "version": "1.0.0",
+  "description": "Prueba parcial3",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "preinstall": "npx npm-force-resolutions"
+  },
+  "author": "Tu Nombre",
+  "license": "MIT",
+  "dependencies": {},
+  "resolutions": {
+    "cross-spawn": "^7.0.5"
+  },
+  "devDependencies": {
+    "npm-force-resolutions": "^0.0.10"
+  }
+}
