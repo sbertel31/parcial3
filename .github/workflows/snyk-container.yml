@@ -37,18 +37,23 @@ jobs:
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
-      - name: Validar archivo SARIF generado
+      - name: Validar y limpiar archivo SARIF
         run: |
           if [ -f "report.sarif" ]; then
-            echo "Archivo SARIF encontrado. Corrigiendo posibles campos nulos..."
-            sed -i 's/"securitySeverity": null/"securitySeverity": "medium"/g' report.sarif
+           echo "Archivo SARIF encontrado. Corrigiendo campos nulos..."
+             jq 'walk(
+          if type == "object" and has("securitySeverity") and .securitySeverity == null
+             then .securitySeverity = 5.0
+          else .
+          end
+            )' report.sarif > sanitized.sarif
           else
-            echo "Archivo SARIF no encontrado. Abortando."
-            exit 1
+          echo "No se encontró el archivo SARIF. Abortando."
+          exit 1
           fi
 
       - name: Publicar resultados en GitHub Security
         if: always()
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: report.sarif
+          sarif_file: sanitized.sarif
