@@ -6,7 +6,7 @@ on:
   pull_request:
     branches: [ "main" ]
   schedule:
-    - cron: '18 9 * * 3'
+    - cron: '18 9 * * 3'  # Todos los miércoles a las 09:18 UTC
 
 permissions:
   contents: read
@@ -29,19 +29,26 @@ jobs:
           npm install -g snyk
           snyk auth ${{ secrets.SNYK_TOKEN }}
 
-      - name: Ejecutar análisis de contenedor con Snyk (JSON)
+      - name: Ejecutar análisis de contenedor con Snyk
+        id: container-scan
         continue-on-error: true
         run: |
           snyk container test audited-image \
             --file=Dockerfile \
-            --json > snyk-results.json || true
+            --sarif-file-output=report.sarif || true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
-      - name: Convertir resultado a SARIF limpio
+      - name: Verificar si existe el archivo SARIF
         run: |
-          # Crear un SARIF básico sin campos problemáticos
-          cat > sanitized.sarif << 'EOF'
+          if [ -f "report.sarif" ]; then
+            echo "Archivo SARIF generado correctamente"
+            echo "Contenido del archivo:"
+            head -20 report.sarif
+          else
+            echo "No se generó el archivo SARIF"
+            echo "Creando archivo SARIF vacío para evitar errores..."
+            cat > report.sarif << 'EOF'
           {
             "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
             "version": "2.1.0",
@@ -49,10 +56,8 @@ jobs:
               {
                 "tool": {
                   "driver": {
-                    "name": "Snyk Container Security",
-                    "version": "1.0.0",
-                    "informationUri": "https://snyk.io/",
-                    "rules": []
+                    "name": "Snyk Container",
+                    "version": "1.0.0"
                   }
                 },
                 "results": []
@@ -60,30 +65,108 @@ jobs:
             ]
           }
           EOF
+          fi
+
+      - name: Validar y limpiar archivo SARIF
+        run: |
+          echo "Procesando archivo SARIF..."
           
-          # Si hay resultados de Snyk, intentar procesarlos
-          if [ -f "snyk-results.json" ] && jq empty snyk-results.json 2>/dev/null; then
-            echo "Procesando resultados de Snyk..."
-            
-            # Extraer vulnerabilidades básicas
-            jq -r '
-              if .vulnerabilities then
-                .vulnerabilities[] | 
-                "Vulnerability: " + .title + " (Severity: " + .severity + ")"
+          # Verificar si el archivo es válido JSON
+          if ! jq empty report.sarif 2>/dev/null; then
+            echo "El archivo SARIF no es un JSON válido"
+            exit 1
+          fi
+          
+          echo "Buscando valores null en securitySeverity..."
+          jq '.runs[].results[].rule.properties.securitySeverity // empty' report.sarif | grep -c null || echo "No se encontraron valores null explícitos"
+          
+          # Limpiar valores nulos de manera más específica
+          jq '
+            def fix_security_severity:
+              if type == "object" then
+                if has("securitySeverity") then
+                  if .securitySeverity == null or .securitySeverity == "" or .securitySeverity == "null" then
+                    .securitySeverity = 5.0
+                  else
+                    .
+                  end
+                else
+                  .
+                end
               else
-                empty
-              end
-            ' snyk-results.json > vulnerabilities.txt || echo "No se pudieron procesar vulnerabilidades"
+                .
+              end;
             
-            VULN_COUNT=$(wc -l < vulnerabilities.txt 2>/dev/null || echo "0")
-            echo "Encontradas $VULN_COUNT vulnerabilidades"
+            def fix_level:
+              if type == "object" then
+                if has("level") then
+                  if .level == null or .level == "" or .level == "null" then
+                    .level = "warning"
+                  else
+                    .
+                  end
+                else
+                  .
+                end
+              else
+                .
+              end;
             
-            if [ "$VULN_COUNT" -gt 0 ]; then
-              echo "Primeras 5 vulnerabilidades:"
-              head -5 vulnerabilities.txt
-            fi
+            # Aplicar correcciones en toda la estructura
+            walk(fix_security_severity | fix_level) |
+            
+            # Corrección específica para las propiedades de las reglas
+            if .runs then
+              .runs |= map(
+                if .tool.driver.rules then
+                  .tool.driver.rules |= map(
+                    if .properties.securitySeverity == null then
+                      .properties.securitySeverity = 5.0
+                    else
+                      .
+                    end
+                  )
+                else
+                  .
+                end
+              )
+            else
+              .
+            end
+          ' report.sarif > sanitized.sarif
+          
+          # Verificación adicional para asegurar que no hay valores null
+          echo "🔍 Verificando archivo sanitizado..."
+          NULL_COUNT=$(jq -r 'paths(scalars) as $p | getpath($p) | select(. == null)' sanitized.sarif 2>/dev/null | wc -l || echo "0")
+          echo "Valores null restantes: $NULL_COUNT"
+          
+          if [ "$NULL_COUNT" -gt 0 ]; then
+            echo "⚠Aún hay valores null, aplicando limpieza final..."
+            jq 'walk(if . == null then "unknown" else . end)' sanitized.sarif > final.sarif
+            mv final.sarif sanitized.sarif
+          fi
+          
+          # Verificar que el archivo sanitizado es válido JSON
+          if jq empty sanitized.sarif 2>/dev/null; then
+            echo "Archivo SARIF sanitizado correctamente"
+            echo "Tamaño del archivo: $(wc -c < sanitized.sarif) bytes"
           else
-            echo "ℹNo se generaron resultados JSON válidos"
+            echo "Error al sanitizar el archivo SARIF"
+            exit 1
+          fi
+
+      - name: Mostrar resumen del análisis
+        if: always()
+        run: |
+          if [ -f "sanitized.sarif" ]; then
+            echo "Resumen del análisis de seguridad:"
+            TOTAL_RESULTS=$(jq '.runs[0].results | length' sanitized.sarif 2>/dev/null || echo "0")
+            echo "Total de vulnerabilidades encontradas: $TOTAL_RESULTS"
+            
+            if [ "$TOTAL_RESULTS" -gt 0 ]; then
+              echo "Tipos de problemas encontrados:"
+              jq -r '.runs[0].results[].level // "unknown"' sanitized.sarif 2>/dev/null | sort | uniq -c || echo "No se pudieron extraer los niveles"
+            fi
           fi
 
       - name: Publicar resultados en GitHub Security
