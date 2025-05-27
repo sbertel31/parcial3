@@ -1,4 +1,4 @@
-name: Enhanced Container Security Scan
+name: Container Vulnerability Audit
 
 on:
   push:
@@ -6,81 +6,49 @@ on:
   pull_request:
     branches: [ "main" ]
   schedule:
-    - cron: '39 20 * * 1'
-
-env:
-  SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-  IMAGE_NAME: "ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}:${{ github.sha }}"
-  DOCKERFILE: "Dockerfile"
-  NODE_VERSION: "20.9.0"
+    - cron: '18 9 * * 3'  # Todos los miércoles a las 09:18 UTC
 
 permissions:
   contents: read
   security-events: write
-  packages: write
-  id-token: write
 
 jobs:
-  security-scan:
+  container-scan:
+    name: Run Snyk Scan on Docker Image
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Obtener el código fuente
+        uses: actions/checkout@v4
 
-    - name: Setup Node.js ${{ env.NODE_VERSION }}
-      uses: actions/setup-node@v3
-      with:
-        node-version: ${{ env.NODE_VERSION }}
+      - name: Construir imagen Docker para análisis
+        run: docker build -t audited-image .
 
-    - name: Install Snyk CLI
-      run: npm install -g snyk
+      - name: Instalar CLI de Snyk
+        run: npm install -g snyk
 
-    - name: Login to GitHub Container Registry
-      uses: docker/login-action@v2
-      with:
-        registry: ghcr.io
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Ejecutar análisis de contenedor con Snyk
+        id: container-scan
+        continue-on-error: true
+        run: |
+          snyk container test audited-image \
+            --file=Dockerfile \
+            --sarif > report.sarif
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
-    - name: Build Docker image
-      run: |
-        docker build -t $IMAGE_NAME \
-          --build-arg NODE_VERSION=$NODE_VERSION \
-          -f $DOCKERFILE .
-        docker tag $IMAGE_NAME ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}:latest
+      - name: Validar archivo SARIF generado
+        run: |
+          if [ -f "report.sarif" ]; then
+            echo "Archivo SARIF encontrado. Corrigiendo posibles campos nulos..."
+            sed -i 's/"securitySeverity": null/"securitySeverity": "medium"/g' report.sarif
+          else
+            echo "Archivo SARIF no encontrado. Abortando."
+            exit 1
+          fi
 
-    - name: Authenticate with Snyk
-      run: snyk auth $SNYK_TOKEN
-
-    - name: Run Snyk container scan and save SARIF
-      continue-on-error: true
-      run: snyk container test $IMAGE_NAME --file=$DOCKERFILE --sarif > snyk.sarif
-
-    - name: Fix null securitySeverity in SARIF
-      run: |
-        if [ -f "snyk.sarif" ]; then
-          echo "Cleaning SARIF file"
-          sed -i 's/"securitySeverity": null/"securitySeverity": 5.0/g' snyk.sarif
-        else
-          echo "SARIF file NOT found"
-          exit 1
-        fi
-
-    - name: Upload SARIF to GitHub Security
-      uses: github/codeql-action/upload-sarif@v3
-      with:
-        sarif_file: snyk.sarif
-
-    - name: Push Docker image to GHCR
-      run: |
-        docker push $IMAGE_NAME
-        docker push ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}:latest
-
-    - name: Verify container health
-      run: |
-        docker run -d --name test-container -p 3000:3000 $IMAGE_NAME
-        sleep 10
-        curl -s http://localhost:3000 || echo "Health check failed"
-        docker stop test-container
-        docker rm test-container
+      - name: Publicar resultados en GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: report.sarif
