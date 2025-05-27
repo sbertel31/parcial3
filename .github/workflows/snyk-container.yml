@@ -57,11 +57,11 @@ jobs:
       continue-on-error: true
       run: snyk container test $IMAGE_NAME --file=$DOCKERFILE --sarif > snyk.sarif
 
-    - name: Verificar y limpiar archivo SARIF
+    - name: Fix null securitySeverity in SARIF
       run: |
         if [ -f "snyk.sarif" ]; then
-          echo "SARIF file exists"
-          sed -i 's/"securitySeverity": null/"securitySeverity": "medium"/g' snyk.sarif
+          echo "Cleaning SARIF file"
+          sed -i 's/"securitySeverity": null/"securitySeverity": 5.0/g' snyk.sarif
         else
           echo "SARIF file NOT found"
           exit 1
