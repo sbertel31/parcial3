@@ -1,17 +1,4 @@
-# This workflow uses actions that are not certified by GitHub.
-# They are provided by a third-party and are governed by
-# separate terms of service, privacy policy, and support
-# documentation.
-
-# A sample workflow which checks out the code, builds a container
-# image using Docker and scans that image for vulnerabilities using
-# Snyk. The results are then uploaded to GitHub Security Code Scanning
-#
-# For more examples, including how to limit scans to only high-severity
-# issues, monitor images for newly disclosed vulnerabilities in Snyk and
-# fail PR checks for new vulnerabilities, see https://github.com/snyk/actions/
-
-name: Snyk Container
+name: Snyk Container Security Scan
 
 on:
   push:
@@ -21,30 +8,37 @@ on:
   schedule:
     - cron: '39 20 * * 1'
 
+env:
+  SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+  IMAGE_NAME: "your/image-to-test"
+  DOCKERFILE: "Dockerfile"
+
 permissions:
   contents: read
+  security-events: write
+  actions: read
+  id-token: write
 
 jobs:
-  snyk:
-    permissions:
-      contents: read
-      security-events: write
-      actions: read
+  snyk-scan:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build a Docker image
-        run: docker build -t your/image-to-test .
+      - name: Install Snyk
+        run: npm install -g snyk
+
+      - name: Build Docker image
+        run: docker build -t $IMAGE_NAME -f $DOCKERFILE .
 
       - name: Authenticate with Snyk
-        run: snyk auth ${{ secrets.SNYK_TOKEN }}
+        run: snyk auth $SNYK_TOKEN
 
-      - name: Run Snyk to check Docker image and output SARIF
-        run: snyk container test your/image-to-test --file=Dockerfile --sarif-file-output=snyk.sarif || true
+      - name: Run Snyk container scan
+        run: snyk container test $IMAGE_NAME --file=$DOCKERFILE --sarif-file-output=snyk.sarif
+        continue-on-error: true
 
-      - name: Upload result to GitHub Code Scanning
+      - name: Upload results to GitHub Code Scanning
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: snyk.sarif
-
